@@ -1,0 +1,2518 @@
+
+================================================================================
+FILE: src\MyShop.Application\Abstractions\IProductRepository.cs
+================================================================================
+﻿using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Abstractions;
+
+public interface IProductRepository : IRepository<Product>
+{
+    // Product’a özel ek query’ler varsa buraya
+}
+
+================================================================================
+FILE: src\MyShop.Application\Abstractions\IReadOnlyRepository.cs
+================================================================================
+﻿using MyShop.Application.Common;
+
+namespace MyShop.Application.Abstractions;
+
+public interface IReadOnlyRepository<TEntity> where TEntity : class
+{
+    Task<TEntity?> GetByIdAsync(int id);
+
+    Task<PaginatedResponse<TEntity>> ListAllAsync(
+        int pageIndex,
+        int pageSize);
+
+    Task<PaginatedResponse<TEntity>> ListAsync(
+        ISpecification<TEntity> specification,
+        int pageIndex,
+        int pageSize);
+}
+
+================================================================================
+FILE: src\MyShop.Application\Abstractions\IRepository.cs
+================================================================================
+﻿namespace MyShop.Application.Abstractions;
+public interface IRepository<TEntity> : IReadOnlyRepository<TEntity>
+    where TEntity : class
+{
+    Task AddAsync(TEntity entity);
+    Task UpdateAsync(TEntity entity);
+    Task DeleteAsync(TEntity entity);
+}
+
+================================================================================
+FILE: src\MyShop.Application\Abstractions\ISpecification.cs
+================================================================================
+﻿using System.Linq.Expressions;
+
+namespace MyShop.Application.Abstractions;
+
+public interface ISpecification<TEntity> where TEntity : class
+{
+    Expression<Func<TEntity, bool>>? Criteria { get; }
+
+    List<Expression<Func<TEntity, object>>> Includes { get; }
+
+    // Sıralama için; IQueryable'ı sızdırmadan içerde kullanacağız.
+    Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>>? OrderBy { get; }
+    Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>>? OrderByDescending { get; }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Abstractions\IUnitOfWork.cs
+================================================================================
+﻿namespace MyShop.Application.Abstractions;
+
+public interface IUnitOfWork
+{
+    Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\ExpressionBuilder.cs
+================================================================================
+﻿using System.Linq.Expressions;
+using System.Reflection;
+
+namespace MyShop.Application.Common;
+
+public static class ExpressionBuilder
+{
+    // ---------------- FILTER ----------------
+
+    public static Expression<Func<T, bool>> BuildAndPredicate<T>(
+        IEnumerable<FilterCriterion> filters)
+    {
+        var filterList = filters?.ToList() ?? new List<FilterCriterion>();
+        var parameter = Expression.Parameter(typeof(T), "x");
+
+        Expression? body = null;
+
+        foreach (var filter in filterList)
+        {
+            var expr = BuildSinglePredicate<T>(parameter, filter);
+            if (expr is null)
+                continue;
+
+            body = body is null
+                ? expr
+                : Expression.AndAlso(body, expr);
+        }
+
+        if (body is null)
+        {
+            body = Expression.Constant(true);
+        }
+
+        return Expression.Lambda<Func<T, bool>>(body, parameter);
+    }
+
+    private static Expression? BuildSinglePredicate<T>(
+        ParameterExpression parameter,
+        FilterCriterion filter)
+    {
+        // Nested path destekli: "Category.Name" vs.
+        var left = BuildPropertyPathExpression(parameter, filter.PropertyPath);
+        var memberType = left.Type;
+
+        var nonNullableType = Nullable.GetUnderlyingType(memberType) ?? memberType;
+
+        object? convertedValue = null;
+        if (filter.Value is not null)
+        {
+            convertedValue = Convert.ChangeType(filter.Value, nonNullableType);
+        }
+
+        Expression right = Expression.Constant(convertedValue, nonNullableType);
+
+        // constant'ı member tipine cast et (nullable vs.)
+        if (memberType != nonNullableType)
+        {
+            right = Expression.Convert(right, memberType);
+        }
+
+        // string özel
+        if (memberType == typeof(string))
+        {
+            return BuildStringPredicate(left, right, filter);
+        }
+
+        return filter.Operation switch
+        {
+            FilterOperation.Equals =>
+                Expression.Equal(left, right),
+
+            FilterOperation.NotEquals =>
+                Expression.NotEqual(left, right),
+
+            FilterOperation.GreaterThan =>
+                Expression.GreaterThan(left, right),
+
+            FilterOperation.GreaterThanOrEqual =>
+                Expression.GreaterThanOrEqual(left, right),
+
+            FilterOperation.LessThan =>
+                Expression.LessThan(left, right),
+
+            FilterOperation.LessThanOrEqual =>
+                Expression.LessThanOrEqual(left, right),
+
+            _ => throw new NotSupportedException(
+                $"Operation '{filter.Operation}' is not supported for type '{memberType.Name}'.")
+        };
+    }
+
+    private static Expression BuildStringPredicate(
+        Expression left,
+        Expression right,
+        FilterCriterion filter)
+    {
+        Expression leftExpr = left;
+        Expression rightExpr = right;
+
+        if (filter.CaseInsensitive)
+        {
+            var toLower = typeof(string).GetMethod(
+                nameof(string.ToLower),
+                Type.EmptyTypes)!;
+
+            leftExpr = Expression.Call(leftExpr, toLower);
+            rightExpr = Expression.Call(rightExpr, toLower);
+        }
+
+        return filter.Operation switch
+        {
+            FilterOperation.Equals =>
+                Expression.Equal(leftExpr, rightExpr),
+
+            FilterOperation.NotEquals =>
+                Expression.NotEqual(leftExpr, rightExpr),
+
+            FilterOperation.Contains =>
+                Expression.Call(leftExpr,
+                    nameof(string.Contains),
+                    Type.EmptyTypes,
+                    rightExpr),
+
+            FilterOperation.StartsWith =>
+                Expression.Call(leftExpr,
+                    nameof(string.StartsWith),
+                    Type.EmptyTypes,
+                    rightExpr),
+
+            FilterOperation.EndsWith =>
+                Expression.Call(leftExpr,
+                    nameof(string.EndsWith),
+                    Type.EmptyTypes,
+                    rightExpr),
+
+            _ => throw new NotSupportedException(
+                $"Operation '{filter.Operation}' is not supported for string.")
+        };
+    }
+
+    /// <summary>
+    /// "Category.Name" gibi property path'leri destekler.
+    /// x =&gt; x.Category.Name
+    /// </summary>
+    private static Expression BuildPropertyPathExpression(
+        Expression root,
+        string propertyPath)
+    {
+        if (root is null) throw new ArgumentNullException(nameof(root));
+        if (string.IsNullOrWhiteSpace(propertyPath))
+            throw new ArgumentNullException(nameof(propertyPath));
+
+        var parts = propertyPath.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        Expression current = root;
+        foreach (var part in parts)
+        {
+            current = Expression.PropertyOrField(current, part);
+        }
+
+        return current;
+    }
+
+    // ---------------- SORTING ----------------
+
+    /// <summary>
+    /// Tek alan sort: Specification.ApplyOrderBy ile kullanmak için
+    /// Func&lt;IQueryable&lt;T&gt;, IOrderedQueryable&lt;T&gt;&gt; döndürür.
+    /// </summary>
+    public static Func<IQueryable<T>, IOrderedQueryable<T>> BuildOrderBy<T>(
+        SortCriterion sort)
+    {
+        if (sort is null) throw new ArgumentNullException(nameof(sort));
+
+        return query => query.OrderByPropertyPath(sort.PropertyPath, sort.Descending);
+    }
+
+    /// <summary>
+    /// Çoklu sort: OrderBy + ThenBy(…) zinciri.
+    /// </summary>
+    public static Func<IQueryable<T>, IOrderedQueryable<T>> BuildOrderBy<T>(
+        IReadOnlyList<SortCriterion> sorts)
+    {
+        if (sorts is null) throw new ArgumentNullException(nameof(sorts));
+        if (sorts.Count == 0)
+            throw new ArgumentException("At least one sort criterion is required.", nameof(sorts));
+
+        return query =>
+        {
+            IOrderedQueryable<T>? ordered = null;
+            IQueryable<T> current = query;
+
+            for (var i = 0; i < sorts.Count; i++)
+            {
+                var s = sorts[i];
+
+                if (i == 0)
+                {
+                    ordered = current.OrderByPropertyPath(s.PropertyPath, s.Descending);
+                }
+                else
+                {
+                    ordered = ordered!.ThenByPropertyPath(s.PropertyPath, s.Descending);
+                }
+            }
+
+            return ordered!;
+        };
+    }
+
+    public static IOrderedQueryable<T> OrderByPropertyPath<T>(
+        this IQueryable<T> source,
+        string propertyPath,
+        bool descending)
+    {
+        if (source is null) throw new ArgumentNullException(nameof(source));
+        if (string.IsNullOrWhiteSpace(propertyPath))
+            throw new ArgumentNullException(nameof(propertyPath));
+
+        var parameter = Expression.Parameter(typeof(T), "x");
+        var body = BuildPropertyPathExpression(parameter, propertyPath);
+        var keySelector = Expression.Lambda(body, parameter);
+
+        var methodName = descending ? "OrderByDescending" : "OrderBy";
+
+        return (IOrderedQueryable<T>)CallOrderMethod(
+            source,
+            methodName,
+            typeof(T),
+            body.Type,
+            keySelector);
+    }
+
+    public static IOrderedQueryable<T> ThenByPropertyPath<T>(
+        this IOrderedQueryable<T> source,
+        string propertyPath,
+        bool descending)
+    {
+        if (source is null) throw new ArgumentNullException(nameof(source));
+        if (string.IsNullOrWhiteSpace(propertyPath))
+            throw new ArgumentNullException(nameof(propertyPath));
+
+        var parameter = Expression.Parameter(typeof(T), "x");
+        var body = BuildPropertyPathExpression(parameter, propertyPath);
+        var keySelector = Expression.Lambda(body, parameter);
+
+        var methodName = descending ? "ThenByDescending" : "ThenBy";
+
+        return (IOrderedQueryable<T>)CallOrderMethod(
+            source,
+            methodName,
+            typeof(T),
+            body.Type,
+            keySelector);
+    }
+
+    private static object CallOrderMethod(
+        IQueryable source,
+        string methodName,
+        Type entityType,
+        Type keyType,
+        LambdaExpression keySelector)
+    {
+        var method = typeof(Queryable).GetMethods()
+            .First(m =>
+                m.Name == methodName &&
+                m.GetParameters().Length == 2);
+
+        var genericMethod = method.MakeGenericMethod(entityType, keyType);
+
+        return genericMethod.Invoke(null, new object[] { source, keySelector })!;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\FilterConditionDto.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+
+/// <summary>
+/// Tek bir kolon üzerindeki tek bir şart (ör: Price &gt;= 1000).
+/// </summary>
+public sealed class FilterConditionDto
+{
+    // "Price", "Name", "Category.Name" gibi (nested path dahil)
+    public string PropertyPath { get; set; } = null!;
+
+    public FilterOperation Operation { get; set; }
+
+    // Her zaman string gelir, backend tarafında tipine convert edeceğiz.
+    public string? Value { get; set; }
+
+    public bool CaseInsensitive { get; set; }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\FilterCriterion.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public sealed class FilterCriterion
+{
+    public string PropertyPath { get; }
+    public FilterOperation Operation { get; }
+    public object? Value { get; }
+    public bool CaseInsensitive { get; }
+
+    public FilterCriterion(
+        string propertyPath,
+        FilterOperation operation,
+        object? value,
+        bool caseInsensitive = false)
+    {
+        PropertyPath = propertyPath ?? throw new ArgumentNullException(nameof(propertyPath));
+        Operation = operation;
+        Value = value;
+        CaseInsensitive = caseInsensitive;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\FilterGroupDto.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+/// <summary>
+/// Bir grup içindeki şartlar; aralarındaki ilişki Operator ile belirlenir.
+/// Örn: (A AND B) veya (C OR D)
+/// </summary>
+public sealed class FilterGroupDto
+{
+    public FilterLogicalOperator Operator { get; set; } = FilterLogicalOperator.And;
+
+    public List<FilterConditionDto> Conditions { get; set; } = new();
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\FilterLogicalOperator.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public enum FilterLogicalOperator
+{
+    And = 0,
+    Or = 1
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\FilterOperation.cs
+================================================================================
+﻿using System.Linq.Expressions;
+
+namespace MyShop.Application.Common;
+
+public enum FilterOperation
+{
+    Equals,
+    NotEquals,
+    Contains,          // string
+    StartsWith,        // string
+    EndsWith,          // string
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\GridFilterExpressionBuilder.cs
+================================================================================
+﻿using System.Linq.Expressions;
+using MyShop.Application.Specifications.Base;
+
+namespace MyShop.Application.Common;
+
+public static class GridFilterExpressionBuilder
+{
+    /// <summary>
+    /// GridFilterRequestDto içinden (A AND B) OR (C AND D) gibi
+    /// çok seviyeli bir predicate üretir.
+    /// </summary>
+    public static Expression<Func<T, bool>> BuildPredicate<T>(GridFilterRequestDto request)
+    {
+        var parameter = Expression.Parameter(typeof(T), "x");
+
+        if (request.Groups is null || request.Groups.Count == 0)
+        {
+            // Filtre yoksa TRUE dönen predicate
+            return Expression.Lambda<Func<T, bool>>(Expression.Constant(true), parameter);
+        }
+
+        // 1) Her grup için ayrı predicate
+        var groupPredicates = new List<Expression<Func<T, bool>>>();
+
+        foreach (var group in request.Groups)
+        {
+            var groupExpr = BuildGroupPredicate<T>(parameter, group);
+            if (groupExpr is not null)
+            {
+                groupPredicates.Add(groupExpr);
+            }
+        }
+
+        if (groupPredicates.Count == 0)
+        {
+            return Expression.Lambda<Func<T, bool>>(Expression.Constant(true), parameter);
+        }
+
+        // 2) Grupları GroupOperator ile birleştir: AND / OR
+        var combined = groupPredicates[0];
+
+        for (int i = 1; i < groupPredicates.Count; i++)
+        {
+            combined = request.GroupOperator switch
+            {
+                FilterLogicalOperator.And =>
+                    ExpressionCombiner.And(combined, groupPredicates[i]),
+                FilterLogicalOperator.Or =>
+                    ExpressionCombiner.Or(combined, groupPredicates[i]),
+                _ => combined
+            };
+        }
+
+        return combined;
+    }
+
+    private static Expression<Func<T, bool>>? BuildGroupPredicate<T>(
+        ParameterExpression parameter,
+        FilterGroupDto group)
+    {
+        if (group.Conditions is null || group.Conditions.Count == 0)
+            return null;
+
+        // Her condition için tek predicate üret
+        var conditionPredicates = new List<Expression<Func<T, bool>>>();
+
+        foreach (var condition in group.Conditions)
+        {
+            var criterion = condition.ToFilterCriterion();
+
+            // Tek kriterlik bir listeyi mevcut ExpressionBuilder'a verelim
+            var single = ExpressionBuilder.BuildAndPredicate<T>(new[] { criterion });
+            conditionPredicates.Add(single);
+        }
+
+        if (conditionPredicates.Count == 0)
+            return null;
+
+        var combined = conditionPredicates[0];
+
+        for (int i = 1; i < conditionPredicates.Count; i++)
+        {
+            combined = group.Operator switch
+            {
+                FilterLogicalOperator.And =>
+                    ExpressionCombiner.And(combined, conditionPredicates[i]),
+                FilterLogicalOperator.Or =>
+                    ExpressionCombiner.Or(combined, conditionPredicates[i]),
+                _ => combined
+            };
+        }
+
+        return combined;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\GridFilterMapping.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public static class GridFilterMapping
+{
+    public static FilterCriterion ToFilterCriterion(this FilterConditionDto dto)
+        => new(
+            propertyPath: dto.PropertyPath,
+            operation: (Common.FilterOperation)dto.Operation,
+            value: dto.Value,
+            caseInsensitive: dto.CaseInsensitive);
+
+    public static SortCriterion ToSortCriterion(this SortDto dto)
+        => new(dto.PropertyPath, dto.Descending);
+
+    //public static IReadOnlyList<SortCriterion> ToSortCriteria(this IEnumerable<SortDto> dtos)
+    //    => dtos?.Select(d => d.ToSortCriterion()).ToList()
+    //       ?? Array.Empty<SortCriterion>();
+
+    public static IReadOnlyList<SortCriterion> ToSortCriteria(this IEnumerable<SortDto>? dtos)
+    {
+        if (dtos is null)
+            return Array.Empty<SortCriterion>();
+
+        return dtos.Select(d => d.ToSortCriterion()).ToList();
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\GridFilterRequestDto.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+/// <summary>
+/// Gruplar arasındaki ilişki GroupOperator ile belirlenir.
+/// Örn: (Group1) OR (Group2)
+/// </summary>
+public sealed class GridFilterRequestDto
+{
+    public List<FilterGroupDto> Groups { get; set; } = new();
+
+    public FilterLogicalOperator GroupOperator { get; set; } = FilterLogicalOperator.And;
+
+    public List<SortDto> Sorts { get; set; } = new();
+
+    public int PageIndex { get; set; } = 1;
+    public int PageSize { get; set; } = 20;
+}
+
+
+================================================================================
+FILE: src\MyShop.Application\Common\PaginatedResponse.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public sealed class PaginatedResponse<T>
+{
+    public IReadOnlyList<T> Items { get; }
+    public int PageIndex { get; }  // 1-based
+    public int PageSize { get; }
+    public int TotalCount { get; }
+    public int TotalPages { get; }
+    public bool HasPreviousPage => PageIndex > 1;
+    public bool HasNextPage => PageIndex < TotalPages;
+
+    private PaginatedResponse()
+    {
+        
+    }
+    public PaginatedResponse(
+        IReadOnlyList<T> items,
+        int totalCount,
+        int pageIndex,
+        int pageSize)
+    {
+        if (items is null) throw new ArgumentNullException(nameof(items));
+        if (totalCount < 0) throw new ArgumentOutOfRangeException(nameof(totalCount));
+        if (pageIndex < 1) throw new ArgumentOutOfRangeException(nameof(pageIndex));
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+
+        Items = items;
+        TotalCount = totalCount;
+        PageIndex = pageIndex;
+        PageSize = pageSize;
+        TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
+    }
+
+    public static PaginatedResponse<T> Create(
+        IReadOnlyList<T> items,
+        int totalCount,
+        int pageIndex,
+        int pageSize)
+        => new(items, totalCount, pageIndex, pageSize);
+
+
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\SortCriterion.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public sealed class SortCriterion
+{
+    public string PropertyPath { get; }
+    public bool Descending { get; }
+
+    public SortCriterion(string propertyPath, bool descending = false)
+    {
+        PropertyPath = propertyPath ?? throw new ArgumentNullException(nameof(propertyPath));
+        Descending = descending;
+    }
+
+    /// <summary>
+    /// sortBy = "Price,Name"  sortDir = "desc,asc"
+    /// gibi string’leri List&lt;SortCriterion&gt;’a çevirir.
+    /// </summary>
+    public static IReadOnlyList<SortCriterion> CreateMany(
+        string? sortBy,
+        string? sortDir)
+    {
+        if (string.IsNullOrWhiteSpace(sortBy))
+            return Array.Empty<SortCriterion>();
+
+        var props = sortBy.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var dirs = (sortDir ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var result = new List<SortCriterion>();
+
+        for (var i = 0; i < props.Length; i++)
+        {
+            var prop = props[i];
+            var dir = (i < dirs.Length ? dirs[i] : "asc") ?? "asc";
+
+            var desc = dir.Equals("desc", StringComparison.OrdinalIgnoreCase) ||
+                       dir.Equals("descending", StringComparison.OrdinalIgnoreCase);
+
+            result.Add(new SortCriterion(prop, desc));
+        }
+
+        return result;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Common\SortDto.cs
+================================================================================
+﻿namespace MyShop.Application.Common;
+
+public sealed class SortDto
+{
+    public string PropertyPath { get; set; } = null!;
+    public bool Descending { get; set; }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Services\ProductService.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+using MyShop.Application.Common;
+using MyShop.Application.Specifications.Base;
+using MyShop.Application.Specifications.Products;
+using MyShop.Domain.Entities;
+using System.Globalization;
+
+namespace MyShop.Application.Services;
+
+public class ProductService
+{
+    private readonly IRepository<Product> _productRepository;
+    private readonly IUnitOfWork _unitOfWork;
+
+    public ProductService(
+        IRepository<Product> productRepository,
+        IUnitOfWork unitOfWork)
+    {
+        _productRepository = productRepository;
+        _unitOfWork = unitOfWork;
+    }
+
+    public Task<PaginatedResponse<Product>> GetLowStockProductsAsync(
+        int threshold,
+        int pageIndex,
+        int pageSize,
+        bool orderByPriceDescending = false)
+    {
+        var spec = new LowStockSpecification(threshold, orderByPriceDescending);
+        return _productRepository.ListAsync(spec, pageIndex, pageSize);
+    }
+
+    public Task<PaginatedResponse<Product>> GetAllProductsAsync(
+        int pageIndex,
+        int pageSize)
+        => _productRepository.ListAllAsync(pageIndex, pageSize);
+
+    public Task<Product?> GetByIdAsync(int id)
+        => _productRepository.GetByIdAsync(id);
+
+    public async Task<Product> CreateAsync(
+        string name,
+        decimal price,
+        int stockQuantity,
+        int categoryId,
+        CancellationToken cancellationToken = default)
+    {
+        var product = new Product(name, price, stockQuantity, categoryId, isActive: true);
+
+        await _productRepository.AddAsync(product);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        return product;
+    }
+
+    public async Task<Product?> UpdateAsync(
+        int id,
+        string name,
+        decimal price,
+        int stockQuantity,
+        int categoryId,
+        bool isActive,
+        CancellationToken cancellationToken = default)
+    {
+        var product = await _productRepository.GetByIdAsync(id);
+        if (product is null)
+            return null;
+
+        // Basit update – domain metodları üzerinden de yapabiliriz.
+        // Örneğin: product.ChangePrice(price) vs.
+        typeof(Product).GetProperty(nameof(Product.Name))!
+            .SetValue(product, name);
+
+        typeof(Product).GetProperty(nameof(Product.Price))!
+            .SetValue(product, price);
+
+        typeof(Product).GetProperty(nameof(Product.StockQuantity))!
+            .SetValue(product, stockQuantity);
+
+        typeof(Product).GetProperty(nameof(Product.CategoryId))!
+            .SetValue(product, categoryId);
+
+        if (isActive)
+            product.Activate();
+        else
+            product.Deactivate();
+
+        await _productRepository.UpdateAsync(product);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        return product;
+    }
+
+    public async Task<bool> DeleteAsync(int id, CancellationToken cancellationToken = default)
+    {
+        var product = await _productRepository.GetByIdAsync(id);
+        if (product is null)
+            return false;
+
+        await _productRepository.DeleteAsync(product);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        return true;
+    }
+
+
+    public async Task<PaginatedResponse<Product>> GetLowStockExpensiveNonElectronicsAsync(
+    int stockThreshold,
+    decimal minPrice,
+    int pageIndex,
+    int pageSize)
+    {
+        var lowStock = new LowStockSpecification(stockThreshold);
+        var expensive = new ExpensiveProductSpecification(minPrice);
+        var inElectronics = new ProductByCategoryNameSpecification("Electronics");
+
+        var spec = lowStock
+            .And(expensive)
+            .And(inElectronics.Not());
+
+        return await _productRepository.ListAsync(spec, pageIndex, pageSize);
+    }
+
+    public Task<PaginatedResponse<Product>> SearchAsync(
+        string? search,
+        bool? isActive,
+        decimal? minPrice,
+        decimal? maxPrice,
+        string? categoryName,
+        IReadOnlyList<SortCriterion>? sorts,
+        int pageIndex,
+        int pageSize)
+    {
+        var spec = new ProductSearchSpecification(
+            search: search,
+            isActive: isActive,
+            minPrice: minPrice,
+            maxPrice: maxPrice,
+            categoryName: categoryName,
+            sorts: sorts);
+
+        return _productRepository.ListAsync(spec, pageIndex, pageSize);
+    }
+
+    public Task<PaginatedResponse<Product>> SearchWithGridAsync(
+        GridFilterRequestDto request)
+    {
+        var spec = new ProductGridSearchSpecification(request);
+
+        return _productRepository.ListAsync(spec, request.PageIndex, request.PageSize);
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\AndSpecification.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+
+namespace MyShop.Application.Specifications.Base;
+
+// AND
+public sealed class AndSpecification<TEntity> : Specification<TEntity>
+    where TEntity : class
+{
+    public AndSpecification(ISpecification<TEntity> left, ISpecification<TEntity> right)
+    {
+        if (left.Criteria is null && right.Criteria is null)
+        {
+            Criteria = null;
+        }
+        else if (left.Criteria is null)
+        {
+            Criteria = right.Criteria;
+        }
+        else if (right.Criteria is null)
+        {
+            Criteria = left.Criteria;
+        }
+        else
+        {
+            Criteria = ExpressionCombiner.And(left.Criteria, right.Criteria);
+        }
+
+        // Includes: left + right (distinct)
+        Includes.AddRange(
+            left.Includes
+                .Concat(right.Includes)
+                .Distinct());
+
+        // Order: left > right
+        OrderBy = left.OrderBy ?? right.OrderBy;
+        OrderByDescending = left.OrderByDescending ?? right.OrderByDescending;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\ExpressionCombiner.cs
+================================================================================
+﻿using System.Linq.Expressions;
+
+namespace MyShop.Application.Specifications.Base;
+
+public static class ExpressionCombiner
+{
+    public static Expression<Func<T, bool>> And<T>(
+        Expression<Func<T, bool>> left,
+        Expression<Func<T, bool>> right)
+    {
+        if (left is null) throw new ArgumentNullException(nameof(left));
+        if (right is null) throw new ArgumentNullException(nameof(right));
+
+        var parameter = left.Parameters.Single();
+        var rightBody = new ParameterReplacer(right.Parameters.Single(), parameter).Visit(right.Body);
+        var body = Expression.AndAlso(left.Body, rightBody!);
+
+        return Expression.Lambda<Func<T, bool>>(body, parameter);
+    }
+
+    public static Expression<Func<T, bool>> Or<T>(
+        Expression<Func<T, bool>> left,
+        Expression<Func<T, bool>> right)
+    {
+        if (left is null) throw new ArgumentNullException(nameof(left));
+        if (right is null) throw new ArgumentNullException(nameof(right));
+
+        var parameter = left.Parameters.Single();
+        var rightBody = new ParameterReplacer(right.Parameters.Single(), parameter).Visit(right.Body);
+        var body = Expression.OrElse(left.Body, rightBody!);
+
+        return Expression.Lambda<Func<T, bool>>(body, parameter);
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\NotSpecification.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+using System.Linq.Expressions;
+
+namespace MyShop.Application.Specifications.Base;
+
+// NOT
+public sealed class NotSpecification<TEntity> : Specification<TEntity>
+    where TEntity : class
+{
+    public NotSpecification(ISpecification<TEntity> inner)
+    {
+        if (inner.Criteria is null)
+        {
+            Criteria = null;
+        }
+        else
+        {
+            var param = inner.Criteria.Parameters.Single();
+            var body = Expression.Not(inner.Criteria.Body);
+            Criteria = Expression.Lambda<Func<TEntity, bool>>(body, param);
+        }
+
+        // Includes & Order'ı mirror et
+        Includes.AddRange(inner.Includes);
+        OrderBy = inner.OrderBy;
+        OrderByDescending = inner.OrderByDescending;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\OrSpecification.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+
+namespace MyShop.Application.Specifications.Base;
+
+// OR
+public sealed class OrSpecification<TEntity> : Specification<TEntity>
+    where TEntity : class
+{
+    public OrSpecification(ISpecification<TEntity> left, ISpecification<TEntity> right)
+    {
+        if (left.Criteria is null && right.Criteria is null)
+        {
+            Criteria = null;
+        }
+        else if (left.Criteria is null)
+        {
+            Criteria = right.Criteria;
+        }
+        else if (right.Criteria is null)
+        {
+            Criteria = left.Criteria;
+        }
+        else
+        {
+            Criteria = ExpressionCombiner.Or(left.Criteria, right.Criteria);
+        }
+
+        // Includes: left + right (distinct)
+        Includes.AddRange(
+            left.Includes
+                .Concat(right.Includes)
+                .Distinct());
+
+        // Order: left > right
+        OrderBy = left.OrderBy ?? right.OrderBy;
+        OrderByDescending = left.OrderByDescending ?? right.OrderByDescending;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\ParameterReplacer.cs
+================================================================================
+﻿using System.Linq.Expressions;
+
+namespace MyShop.Application.Specifications.Base;
+
+public sealed class ParameterReplacer : ExpressionVisitor
+{
+    private readonly ParameterExpression _parameter;
+    private readonly ParameterExpression _replacement;
+
+    public ParameterReplacer(ParameterExpression parameter, ParameterExpression replacement)
+    {
+        _parameter = parameter ?? throw new ArgumentNullException(nameof(parameter));
+        _replacement = replacement ?? throw new ArgumentNullException(nameof(replacement));
+    }
+
+    protected override Expression VisitParameter(ParameterExpression node)
+        => node == _parameter ? _replacement : base.VisitParameter(node);
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\Specification.cs
+================================================================================
+﻿using System.Linq.Expressions;
+using MyShop.Application.Abstractions;
+
+namespace MyShop.Application.Specifications.Base;
+
+public abstract class Specification<TEntity> : ISpecification<TEntity>
+    where TEntity : class
+{
+    public virtual Expression<Func<TEntity, bool>>? Criteria { get; protected set; }
+
+    public List<Expression<Func<TEntity, object>>> Includes { get; }
+        = new();
+
+    public Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>>? OrderBy { get; protected set; }
+    public Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>>? OrderByDescending { get; protected set; }
+
+    protected void AddInclude(Expression<Func<TEntity, object>> includeExpression)
+        => Includes.Add(includeExpression);
+
+    protected void ApplyOrderBy(Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>> orderByExpression)
+        => OrderBy = orderByExpression;
+
+    protected void ApplyOrderByDescending(Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>> orderByDescendingExpression)
+        => OrderByDescending = orderByDescendingExpression;
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Base\SpecificationExtensions.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+
+namespace MyShop.Application.Specifications.Base;
+
+public static class SpecificationExtensions
+{
+    public static ISpecification<TEntity> And<TEntity>(
+        this ISpecification<TEntity> left,
+        ISpecification<TEntity> right)
+        where TEntity : class
+        => new AndSpecification<TEntity>(left, right);
+
+    public static ISpecification<TEntity> Or<TEntity>(
+        this ISpecification<TEntity> left,
+        ISpecification<TEntity> right)
+        where TEntity : class
+        => new OrSpecification<TEntity>(left, right);
+
+    public static ISpecification<TEntity> Not<TEntity>(
+        this ISpecification<TEntity> specification)
+        where TEntity : class
+        => new NotSpecification<TEntity>(specification);
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Products\ExpensiveProductSpecification.cs
+================================================================================
+﻿using System;
+using System.Linq;
+using MyShop.Application.Specifications.Base;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Specifications.Products;
+
+public sealed class ExpensiveProductSpecification : Specification<Product>
+{
+    public decimal MinPrice { get; }
+
+    public ExpensiveProductSpecification(decimal minPrice)
+    {
+        if (minPrice < 0)
+            throw new ArgumentOutOfRangeException(nameof(minPrice));
+
+        MinPrice = minPrice;
+
+        Criteria = p => p.Price >= minPrice && p.IsActive;
+
+        AddInclude(p => p.Category);
+
+        ApplyOrderByDescending(q => q.OrderByDescending(p => p.Price));
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Products\LowStockSpecification.cs
+================================================================================
+﻿using MyShop.Application.Specifications.Base;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Specifications.Products;
+
+public sealed class LowStockSpecification : Specification<Product>
+{
+    public int Threshold { get; }
+
+    public LowStockSpecification(
+        int threshold,
+        bool orderByPriceDescending = false)
+    {
+        if (threshold < 0)
+            throw new ArgumentOutOfRangeException(nameof(threshold));
+
+        Threshold = threshold;
+
+        Criteria = p => p.StockQuantity < threshold && p.IsActive;
+
+        AddInclude(p => p.Category);
+
+        if (orderByPriceDescending)
+        {
+            ApplyOrderByDescending(q => q.OrderByDescending(p => p.Price));
+        }
+        else
+        {
+            ApplyOrderBy(q => q
+                .OrderBy(p => p.StockQuantity)
+                .ThenBy(p => p.Name));
+        }
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Products\ProductByCategoryNameSpecification.cs
+================================================================================
+﻿using System;
+using System.Linq;
+using MyShop.Application.Specifications.Base;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Specifications.Products;
+
+public sealed class ProductByCategoryNameSpecification : Specification<Product>
+{
+    public string CategoryName { get; }
+
+    public ProductByCategoryNameSpecification(string categoryName)
+    {
+        if (string.IsNullOrWhiteSpace(categoryName))
+            throw new ArgumentException("Category name is required.", nameof(categoryName));
+
+        CategoryName = categoryName;
+
+        // WHERE: kategori adı + aktif ürün
+        Criteria = p => p.Category.Name == categoryName && p.IsActive;
+
+        // INCLUDE: Category
+        AddInclude(p => p.Category);
+
+        // ORDER: isim
+        ApplyOrderBy(q => q.OrderBy(p => p.Name));
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Products\ProductGridSearchSpecification.cs
+================================================================================
+﻿using MyShop.Application.Common;
+using MyShop.Application.Specifications.Base;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Specifications.Products;
+
+/// <summary>
+/// Generic grid filtresiyle Product sorgulayan specification.
+/// </summary>
+public sealed class ProductGridSearchSpecification : Specification<Product>
+{
+    public ProductGridSearchSpecification(GridFilterRequestDto request)
+    {
+        // 1) Predicate'i grid filter builder ile oluştur
+        Criteria = GridFilterExpressionBuilder.BuildPredicate<Product>(request);
+
+        // 2) Category'yi her zaman include edelim (Category.Name kullanıldığı için)
+        AddInclude(p => p.Category);
+
+        // 3) Sort'ları mapping edip multi-sort uygula
+        var sorts = request.Sorts?.ToSortCriteria();
+
+        if (sorts is not null && sorts.Count > 0)
+        {
+            ApplyOrderBy(ExpressionBuilder.BuildOrderBy<Product>(sorts));
+        }
+        else
+        {
+            ApplyOrderBy(q => q.OrderBy(p => p.Name));
+        }
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Application\Specifications\Products\ProductSearchSpecification.cs
+================================================================================
+﻿using System.Collections.Generic;
+using MyShop.Application.Common;
+using MyShop.Application.Specifications.Base;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Application.Specifications.Products;
+
+public sealed class ProductSearchSpecification : Specification<Product>
+{
+    public ProductSearchSpecification(
+        string? search,
+        bool? isActive,
+        decimal? minPrice,
+        decimal? maxPrice,
+        string? categoryName,
+        IReadOnlyList<SortCriterion>? sorts)
+    {
+        var filters = new List<FilterCriterion>();
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            filters.Add(new FilterCriterion(
+                propertyPath: nameof(Product.Name),
+                operation: FilterOperation.Contains,
+                value: search,
+                caseInsensitive: true));
+        }
+
+        if (isActive.HasValue)
+        {
+            filters.Add(new FilterCriterion(
+                propertyPath: nameof(Product.IsActive),
+                operation: FilterOperation.Equals,
+                value: isActive.Value));
+        }
+
+        if (minPrice.HasValue)
+        {
+            filters.Add(new FilterCriterion(
+                propertyPath: nameof(Product.Price),
+                operation: FilterOperation.GreaterThanOrEqual,
+                value: minPrice.Value));
+        }
+
+        if (maxPrice.HasValue)
+        {
+            filters.Add(new FilterCriterion(
+                propertyPath: nameof(Product.Price),
+                operation: FilterOperation.LessThanOrEqual,
+                value: maxPrice.Value));
+        }
+
+        if (!string.IsNullOrWhiteSpace(categoryName))
+        {
+            // Nested property path: "Category.Name"
+            filters.Add(new FilterCriterion(
+                propertyPath: "Category.Name",
+                operation: FilterOperation.Equals,
+                value: categoryName,
+                caseInsensitive: true));
+        }
+
+        // Tek bir predicate'e çevir
+        Criteria = ExpressionBuilder.BuildAndPredicate<Product>(filters);
+
+        // Category'yi her durumda include et (mapping için)
+        AddInclude(p => p.Category);
+
+        // SORT
+        if (sorts is not null && sorts.Count > 0)
+        {
+            // Multi-sort: örn. Price desc, Name asc, Category.Name asc
+            ApplyOrderBy(ExpressionBuilder.BuildOrderBy<Product>(sorts));
+        }
+        else
+        {
+            // Default: Name asc
+            ApplyOrderBy(q => q.OrderBy(p => p.Name));
+        }
+    }
+
+}
+
+================================================================================
+FILE: src\MyShop.Domain\Entities\Category.cs
+================================================================================
+﻿namespace MyShop.Domain.Entities;
+
+public class Category
+{
+    public int Id { get; private set; }
+    public string Name { get; private set; } = null!;
+
+    private Category() { }
+
+    public Category(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Name is required.", nameof(name));
+
+        Name = name;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Domain\Entities\Product.cs
+================================================================================
+﻿namespace MyShop.Domain.Entities;
+
+public class Product
+{
+    public int Id { get; private set; }
+    public string Name { get; private set; } = null!;
+    public decimal Price { get; private set; }
+    public int StockQuantity { get; private set; }
+    public bool IsActive { get; private set; }
+
+    public int CategoryId { get; private set; }
+    public Category Category { get; private set; } = null!;
+
+    private Product() { }
+
+    public Product(string name, decimal price, int stockQuantity, int categoryId, bool isActive = true)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Name is required.", nameof(name));
+        if (price < 0)
+            throw new ArgumentOutOfRangeException(nameof(price));
+        if (stockQuantity < 0)
+            throw new ArgumentOutOfRangeException(nameof(stockQuantity));
+
+        Name = name;
+        Price = price;
+        StockQuantity = stockQuantity;
+        CategoryId = categoryId;
+        IsActive = isActive;
+    }
+
+    public void ChangePrice(decimal newPrice)
+    {
+        if (newPrice < 0)
+            throw new ArgumentOutOfRangeException(nameof(newPrice));
+
+        Price = newPrice;
+    }
+
+    public void DecreaseStock(int quantity)
+    {
+        if (quantity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(quantity));
+        if (StockQuantity < quantity)
+            throw new InvalidOperationException("Insufficient stock.");
+
+        StockQuantity -= quantity;
+    }
+
+    public void IncreaseStock(int quantity)
+    {
+        if (quantity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(quantity));
+
+        StockQuantity += quantity;
+    }
+
+    public void Activate() => IsActive = true;
+    public void Deactivate() => IsActive = false;
+}
+
+================================================================================
+FILE: src\MyShop.Persistence\MyShopDbContext.cs
+================================================================================
+﻿using Microsoft.EntityFrameworkCore;
+using MyShop.Domain.Entities;
+using System.Collections.Generic;
+using System.Reflection.Emit;
+
+namespace MyShop.Persistence;
+
+public class MyShopDbContext : DbContext
+{
+    public MyShopDbContext(DbContextOptions<MyShopDbContext> options)
+        : base(options)
+    {
+    }
+
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<Category> Categories => Set<Category>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<Product>(builder =>
+        {
+            builder.Property(p => p.Name)
+                .IsRequired()
+                .HasMaxLength(255);
+
+            builder.Property(p => p.Price)
+                .IsRequired()
+                .HasPrecision(18,2);
+
+            builder.HasOne(p => p.Category)
+                .WithMany()
+                .HasForeignKey(p => p.CategoryId);
+        });
+
+        modelBuilder.Entity<Category>(builder =>
+        {
+            builder.Property(c => c.Name)
+                .IsRequired()
+                .HasMaxLength(127);
+        });
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Persistence\Repositories\EfRepository.cs
+================================================================================
+﻿using Microsoft.EntityFrameworkCore;
+using MyShop.Application.Abstractions;
+using MyShop.Application.Common;
+using MyShop.Persistence.Specifications;
+
+namespace MyShop.Persistence.Repositories;
+
+public class EfRepository<TEntity> : IRepository<TEntity>
+    where TEntity : class
+{
+    protected readonly DbContext DbContext;
+    protected DbSet<TEntity> DbSet => DbContext.Set<TEntity>();
+
+    public EfRepository(DbContext dbContext)
+    {
+        DbContext = dbContext;
+    }
+
+    public virtual async Task<TEntity?> GetByIdAsync(int id)
+    {
+        return await DbSet.FindAsync(id);
+    }
+
+    public virtual async Task<PaginatedResponse<TEntity>> ListAllAsync(
+        int pageIndex,
+        int pageSize)
+    {
+        if (pageIndex < 1) throw new ArgumentOutOfRangeException(nameof(pageIndex));
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+
+        var query = DbSet.AsQueryable();
+
+        var totalCount = await query.CountAsync();
+
+        var items = await query
+            .Skip((pageIndex - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        return PaginatedResponse<TEntity>.Create(items, totalCount, pageIndex, pageSize);
+    }
+
+    public virtual async Task<PaginatedResponse<TEntity>> ListAsync(
+        ISpecification<TEntity> specification,
+        int pageIndex,
+        int pageSize)
+    {
+        if (specification is null) throw new ArgumentNullException(nameof(specification));
+        if (pageIndex < 1) throw new ArgumentOutOfRangeException(nameof(pageIndex));
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+
+        // 1) Filtre/Include/Order uygulanmış base query
+        var baseQuery = DbSet.AsQueryable()
+            .ApplySpecification(specification);
+
+        var totalCount = await baseQuery.CountAsync();
+
+        var items = await baseQuery
+            .Skip((pageIndex - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        return PaginatedResponse<TEntity>.Create(items, totalCount, pageIndex, pageSize);
+    }
+
+    public virtual async Task AddAsync(TEntity entity)
+    {
+        await DbSet.AddAsync(entity);
+    }
+
+    public virtual Task UpdateAsync(TEntity entity)
+    {
+        DbSet.Update(entity);
+        return Task.CompletedTask;
+    }
+
+    public virtual Task DeleteAsync(TEntity entity)
+    {
+        DbSet.Remove(entity);
+        return Task.CompletedTask;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Persistence\Repositories\ProductRepository.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+using MyShop.Domain.Entities;
+
+namespace MyShop.Persistence.Repositories;
+
+public class ProductRepository : EfRepository<Product>, IProductRepository
+{
+    public ProductRepository(MyShopDbContext dbContext)
+        : base(dbContext)
+    {
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Persistence\Specifications\SpecificationEvaluator.cs
+================================================================================
+﻿using Microsoft.EntityFrameworkCore;
+using MyShop.Application.Abstractions;
+
+namespace MyShop.Persistence.Specifications;
+
+public static class SpecificationEvaluator
+{
+    public static IQueryable<TEntity> ApplySpecification<TEntity>(
+        this IQueryable<TEntity> query,
+        ISpecification<TEntity> specification)
+        where TEntity : class
+    {
+        if (specification is null)
+            return query;
+
+        if (specification.Criteria is not null)
+        {
+            query = query.Where(specification.Criteria);
+        }
+
+        foreach (var includeExpression in specification.Includes)
+        {
+            query = query.Include(includeExpression);
+        }
+
+        if (specification.OrderBy is not null)
+        {
+            query = specification.OrderBy(query);
+        }
+        else if (specification.OrderByDescending is not null)
+        {
+            query = specification.OrderByDescending(query);
+        }
+
+        return query;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.Persistence\UnitOfWork\EfUnitOfWork.cs
+================================================================================
+﻿using MyShop.Application.Abstractions;
+
+namespace MyShop.Persistence.UnitOfWork;
+
+public class EfUnitOfWork : IUnitOfWork
+{
+    private readonly MyShopDbContext _dbContext;
+
+    public EfUnitOfWork(MyShopDbContext dbContext)
+    {
+        _dbContext = dbContext;
+    }
+
+    public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        => _dbContext.SaveChangesAsync(cancellationToken);
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Controllers\ProductsController.cs
+================================================================================
+﻿using Microsoft.AspNetCore.Mvc;
+using MyShop.Application.Common;
+using MyShop.Application.Services;
+using MyShop.Application.Specifications.Products;
+using MyShop.Domain.Entities;
+using MyShop.WebApi.Models;
+
+namespace MyShop.WebApi.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase
+{
+    private readonly ProductService _productService;
+
+    public ProductsController(ProductService productService)
+    {
+        _productService = productService;
+    }
+
+    // GET: api/products
+    [HttpGet]
+    [ProducesResponseType(typeof(ApiResponse<PaginatedResponse<ProductDto>>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<PaginatedResponse<ProductDto>>>> GetAll(
+        [FromQuery] int pageIndex = 1,
+        [FromQuery] int pageSize = 20)
+    {
+        var page = await _productService.GetAllProductsAsync(pageIndex, pageSize);
+        var dtoPage = page.ToDtoPage();
+
+        var response = ApiResponse<PaginatedResponse<ProductDto>>.SuccessResponse(dtoPage);
+        return Ok(response);
+    }
+
+    // GET: api/products/low-stock
+    [HttpGet("low-stock")]
+    [ProducesResponseType(typeof(ApiResponse<PaginatedResponse<ProductDto>>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<PaginatedResponse<ProductDto>>>> GetLowStock(
+        [FromQuery] int threshold = 10,
+        [FromQuery] int pageIndex = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] bool orderByPriceDescending = false)
+    {
+        var page = await _productService.GetLowStockProductsAsync(
+            threshold,
+            pageIndex,
+            pageSize,
+            orderByPriceDescending);
+
+        var dtoPage = page.ToDtoPage();
+        var response = ApiResponse<PaginatedResponse<ProductDto>>.SuccessResponse(dtoPage);
+
+        return Ok(response);
+    }
+
+    // GET: api/products/{id}
+    [HttpGet("{id:int}")]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ApiResponse<ProductDto>>> GetById(int id)
+    {
+        var product = await _productService.GetByIdAsync(id);
+        if (product is null)
+        {
+            var notFoundResponse = ApiResponse<ProductDto>.ErrorResponse($"Product with id {id} not found.");
+            return NotFound(notFoundResponse);
+        }
+
+        var dto = product.ToDto();
+        var response = ApiResponse<ProductDto>.SuccessResponse(dto);
+
+        return Ok(response);
+    }
+
+    // POST: api/products
+    [HttpPost]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<ApiResponse<ProductDto>>> Create(
+        [FromBody] CreateProductRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid)
+        {
+            var errors = ModelState
+                .Where(x => x.Value?.Errors.Count > 0)
+                .SelectMany(x => x.Value!.Errors.Select(e => e.ErrorMessage))
+                .ToList();
+
+            var errorResponse = ApiResponse<ProductDto>.ErrorResponse(errors);
+            return BadRequest(errorResponse);
+        }
+
+        var product = await _productService.CreateAsync(
+            request.Name,
+            request.Price,
+            request.StockQuantity,
+            request.CategoryId,
+            cancellationToken);
+
+        var dto = product.ToDto();
+        var response = ApiResponse<ProductDto>.SuccessResponse(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = dto.Id },
+            response);
+    }
+
+    // PUT: api/products/{id}
+    [HttpPut("{id:int}")]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<ProductDto>), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<ApiResponse<ProductDto>>> Update(
+        int id,
+        [FromBody] UpdateProductRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid)
+        {
+            var errors = ModelState
+                .Where(x => x.Value?.Errors.Count > 0)
+                .SelectMany(x => x.Value!.Errors.Select(e => e.ErrorMessage))
+                .ToList();
+
+            var errorResponse = ApiResponse<ProductDto>.ErrorResponse(errors);
+            return BadRequest(errorResponse);
+        }
+
+        var updated = await _productService.UpdateAsync(
+            id,
+            request.Name,
+            request.Price,
+            request.StockQuantity,
+            request.CategoryId,
+            request.IsActive,
+            cancellationToken);
+
+        if (updated is null)
+        {
+            var notFoundResponse = ApiResponse<ProductDto>.ErrorResponse($"Product with id {id} not found.");
+            return NotFound(notFoundResponse);
+        }
+
+        var dto = updated.ToDto();
+        var response = ApiResponse<ProductDto>.SuccessResponse(dto);
+
+        return Ok(response);
+    }
+
+    // DELETE: api/products/{id}
+    [HttpDelete("{id:int}")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ApiResponse<object>>> Delete(
+        int id,
+        CancellationToken cancellationToken)
+    {
+        var deleted = await _productService.DeleteAsync(id, cancellationToken);
+        if (!deleted)
+        {
+            var notFoundResponse = ApiResponse<object>.ErrorResponse($"Product with id {id} not found.");
+            return NotFound(notFoundResponse);
+        }
+
+        var response = ApiResponse<object>.SuccessResponse(null!);
+        return Ok(response);
+    }
+
+    [HttpGet("low-stock-expensive-non-electronics")]
+    public async Task<ActionResult<ApiResponse<PaginatedResponse<ProductDto>>>> GetLowStockExpensiveNonElectronics(
+    [FromQuery] int threshold = 10,
+    [FromQuery] decimal minPrice = 1000m,
+    [FromQuery] int pageIndex = 1,
+    [FromQuery] int pageSize = 20)
+    {
+        var page = await _productService.GetLowStockExpensiveNonElectronicsAsync(threshold, minPrice, pageIndex, pageSize);
+
+        var dtoPage = page.ToDtoPage();
+        var response = ApiResponse<PaginatedResponse<ProductDto>>.SuccessResponse(dtoPage);
+
+        return Ok(response);
+    }
+
+    [HttpGet("search")]
+    [ProducesResponseType(typeof(ApiResponse<PaginatedResponse<ProductDto>>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiResponse<PaginatedResponse<ProductDto>>>> Search(
+     [FromQuery] string? search,
+     [FromQuery] bool? isActive,
+     [FromQuery] decimal? minPrice,
+     [FromQuery] decimal? maxPrice,
+     [FromQuery] string? categoryName,
+     [FromQuery] string? sortBy,   // örn: "Price,Name,Category.Name"
+     [FromQuery] string? sortDir,  // örn: "desc,asc,asc"
+     [FromQuery] int pageIndex = 1,
+     [FromQuery] int pageSize = 20)
+    {
+        var sorts = SortCriterion.CreateMany(sortBy, sortDir);
+
+        var page = await _productService.SearchAsync(
+            search,
+            isActive,
+            minPrice,
+            maxPrice,
+            categoryName,
+            sorts,
+            pageIndex,
+            pageSize);
+
+        var dtoPage = page.ToDtoPage();
+        var response = ApiResponse<PaginatedResponse<ProductDto>>.SuccessResponse(dtoPage);
+        return Ok(response);
+    }
+
+
+
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Models\ApiResponse.cs
+================================================================================
+﻿namespace MyShop.WebApi.Models;
+
+public sealed class ApiResponse<T>
+{
+    public bool Success { get; init; }
+    public List<string> Errors { get; init; } = new();
+    public DateTime TimestampUtc { get; init; } = DateTime.UtcNow;
+    public T? Data { get; init; }
+
+    public ApiResponse() { Errors = new List<string>(); }
+
+    public static ApiResponse<T> SuccessResponse(T data)
+        => new()
+        {
+            Success = true,
+            Data = data
+        };
+
+    public static ApiResponse<T> ErrorResponse(params string[] errors)
+        => new()
+        {
+            Success = false,
+            Errors = errors?.ToList() ?? new List<string>()
+        };
+
+    public static ApiResponse<T> ErrorResponse(IEnumerable<string> errors)
+        => new()
+        {
+            Success = false,
+            Errors = errors?.ToList() ?? new List<string>()
+        };
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Models\CreateProductRequest.cs
+================================================================================
+﻿namespace MyShop.WebApi.Models;
+
+public sealed class CreateProductRequest
+{
+    public string Name { get; init; } = null!;
+    public decimal Price { get; init; }
+    public int StockQuantity { get; init; }
+    public int CategoryId { get; init; }
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Models\ProductDto.cs
+================================================================================
+﻿namespace MyShop.WebApi.Models;
+
+public sealed class ProductDto
+{
+    public int Id { get; init; }
+    public string Name { get; init; } = null!;
+    public decimal Price { get; init; }
+    public int StockQuantity { get; init; }
+    public bool IsActive { get; init; }
+    public int CategoryId { get; init; }
+    public string? CategoryName { get; init; }
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Models\ProductMappings.cs
+================================================================================
+﻿using MyShop.Application.Common;
+using MyShop.Domain.Entities;
+
+namespace MyShop.WebApi.Models;
+
+public static class ProductMappings
+{
+    public static ProductDto ToDto(this Product product)
+        => new()
+        {
+            Id = product.Id,
+            Name = product.Name,
+            Price = product.Price,
+            StockQuantity = product.StockQuantity,
+            IsActive = product.IsActive,
+            CategoryId = product.CategoryId,
+            CategoryName = product.Category?.Name
+        };
+
+    public static PaginatedResponse<ProductDto> ToDtoPage(
+        this PaginatedResponse<Product> page)
+        => PaginatedResponse<ProductDto>.Create(
+            page.Items.Select(p => p.ToDto()).ToList(),
+            page.TotalCount,
+            page.PageIndex,
+            page.PageSize);
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Models\UpdateProductRequest.cs
+================================================================================
+﻿namespace MyShop.WebApi.Models;
+
+public sealed class UpdateProductRequest
+{
+    public string Name { get; init; } = null!;
+    public decimal Price { get; init; }
+    public int StockQuantity { get; init; }
+    public int CategoryId { get; init; }
+    public bool IsActive { get; init; }
+}
+
+================================================================================
+FILE: src\MyShop.WebApi\Program.cs
+================================================================================
+using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
+using MyShop.Application.Abstractions;
+using MyShop.Application.Services;
+using MyShop.Domain.Entities;
+using MyShop.Persistence;
+using MyShop.Persistence.Repositories;
+using MyShop.Persistence.UnitOfWork;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Connection string (appsettings.json'dan)
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("Connection string 'DefaultConnection' is not configured.");
+}
+
+// DbContext
+builder.Services.AddDbContext<MyShopDbContext>(options =>
+{
+    options.UseSqlServer(connectionString);
+
+#if DEBUG
+    options.LogTo(Console.WriteLine);
+    options.EnableSensitiveDataLogging();
+    options.EnableDetailedErrors();
+#endif
+});
+
+// UnitOfWork
+builder.Services.AddScoped<IUnitOfWork, EfUnitOfWork>();
+
+// Repositories
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+
+// IRepository<Product> isteyen herkese IProductRepository ver
+builder.Services.AddScoped<IRepository<Product>>(sp =>
+    sp.GetRequiredService<IProductRepository>());
+
+// Services
+builder.Services.AddScoped<ProductService>();
+
+// Controllers
+builder.Services.AddControllers();
+
+// Swagger / OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "MyShop API",
+        Version = "v1",
+        Description = "Backend API for MyShop sample application"
+    });
+});
+
+var app = builder.Build();
+
+// HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "MyShop API v1");
+    });
+}
+
+app.UseHttpsRedirection();
+
+// E?er ileride auth ekleyeceksen buray? açars?n
+// app.UseAuthentication();
+// app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+
+================================================================================
+FILE: src\MyShop.WebMvc\Controllers\HomeController.cs
+================================================================================
+using Microsoft.AspNetCore.Mvc;
+using MyShop.WebMvc.Models;
+using System.Diagnostics;
+
+namespace MyShop.WebMvc.Controllers
+{
+    public class HomeController : Controller
+    {
+        private readonly ILogger<HomeController> _logger;
+
+        public HomeController(ILogger<HomeController> logger)
+        {
+            _logger = logger;
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        public IActionResult Privacy()
+        {
+            return View();
+        }
+
+        [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
+        public IActionResult Error()
+        {
+            return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
+        }
+    }
+}
+
+================================================================================
+FILE: src\MyShop.WebMvc\Controllers\ProductsController.cs
+================================================================================
+﻿using Microsoft.AspNetCore.Mvc;
+using MyShop.Application.Common;
+using MyShop.Application.Services;
+using MyShop.WebApi.Models;
+using MyShop.WebApi.ViewModel;
+using MyShop.WebMvc.Services;
+
+namespace MyShop.WebMvc.Controllers;
+
+public class ProductsController : Controller
+{
+    private readonly ApiClient _apiClient;
+
+    public ProductsController(ApiClient apiClient)
+    {
+        _apiClient = apiClient;
+    }
+
+    //[HttpGet]
+    //public async Task<IActionResult> Index(ProductGridFilterViewModel model)
+    //{
+    //    // 1) ViewModel'den GridFilterRequestDto üret
+    //    var request = BuildGridFilterRequest(model);
+
+    //    // 2) Application service ile search yap
+    //    var result = await _productService.SearchWithGridAsync(request);
+
+    //    // 3) View'a hem filtre modelini hem de sonucu gönder
+    //    ViewBag.Result = result;
+    //    return View(model);
+    //}
+
+
+    [HttpGet]
+    public async Task<IActionResult> Index(ProductGridFilterViewModel model, CancellationToken cancellationToken)
+    {
+        // 1) Query param sözlüğünü hazırla
+        var queryParams = new Dictionary<string, object?>();
+
+        if (!string.IsNullOrWhiteSpace(model.Search))
+            queryParams["search"] = model.Search;
+
+        if (model.MinPrice.HasValue)
+            queryParams["minPrice"] = model.MinPrice.Value;
+
+        if (model.MaxPrice.HasValue)
+            queryParams["maxPrice"] = model.MaxPrice.Value;
+
+        if (!string.IsNullOrWhiteSpace(model.CategoryName))
+            queryParams["categoryName"] = model.CategoryName;
+
+        if (!string.IsNullOrWhiteSpace(model.SortBy))
+            queryParams["sortBy"] = model.SortBy;
+
+        if (!string.IsNullOrWhiteSpace(model.SortDir))
+            queryParams["sortDir"] = model.SortDir;
+
+        queryParams["pageIndex"] = model.PageIndex <= 0 ? 1 : model.PageIndex;
+        queryParams["pageSize"] = model.PageSize <= 0 ? 20 : model.PageSize;
+
+        // 2) Web API /api/products/search endpoint’ine git
+        var apiResponse = await _apiClient.GetAsync<PaginatedResponse<ProductDto>>(
+            "/api/Products/search",
+            queryParams,
+            cancellationToken);
+
+        // 3) Hata varsa ModelState’e yaz
+        if (!apiResponse.Success)
+        {
+            foreach (var err in apiResponse.Errors)
+            {
+                ModelState.AddModelError(string.Empty, err);
+            }
+        }
+
+        // 4) Data’yı ViewBag ile gönder (veya güçlü tipli ViewModel’e koy)
+        ViewBag.Page = apiResponse.Data;
+
+        return View(model);
+
+    }
+    private static GridFilterRequestDto BuildGridFilterRequest(ProductGridFilterViewModel model)
+    {
+        var request = new GridFilterRequestDto
+        {
+            PageIndex = model.PageIndex <= 0 ? 1 : model.PageIndex,
+            PageSize = model.PageSize <= 0 ? 20 : model.PageSize,
+            GroupOperator = FilterLogicalOperator.And
+        };
+
+        // Basit senaryo: tek grup, içinde birden çok AND şart
+        var group = new FilterGroupDto
+        {
+            Operator = FilterLogicalOperator.And
+        };
+
+        if (!string.IsNullOrWhiteSpace(model.Search))
+        {
+            group.Conditions.Add(new FilterConditionDto
+            {
+                PropertyPath = "Name",
+                Operation = FilterOperation.Contains,
+                Value = model.Search,
+                CaseInsensitive = true
+            });
+        }
+
+        if (model.MinPrice.HasValue)
+        {
+            group.Conditions.Add(new FilterConditionDto
+            {
+                PropertyPath = "Price",
+                Operation = FilterOperation.GreaterThanOrEqual,
+                Value = model.MinPrice.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            });
+        }
+
+        if (model.MaxPrice.HasValue)
+        {
+            group.Conditions.Add(new FilterConditionDto
+            {
+                PropertyPath = "Price",
+                Operation = FilterOperation.LessThanOrEqual,
+                Value = model.MaxPrice.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            });
+        }
+
+        if (!string.IsNullOrWhiteSpace(model.CategoryName))
+        {
+            group.Conditions.Add(new FilterConditionDto
+            {
+                PropertyPath = "Category.Name",
+                Operation = FilterOperation.Equals,
+                Value = model.CategoryName,
+                CaseInsensitive = true
+            });
+        }
+
+        if (group.Conditions.Count > 0)
+        {
+            request.Groups.Add(group);
+        }
+
+        // Sort
+        var sorts = SortCriterion.CreateMany(model.SortBy, model.SortDir)
+            .Select(sc => new SortDto
+            {
+                PropertyPath = sc.PropertyPath,
+                Descending = sc.Descending
+            })
+            .ToList();
+
+        request.Sorts = sorts;
+
+        return request;
+    }
+}
+
+================================================================================
+FILE: src\MyShop.WebMvc\Models\ErrorViewModel.cs
+================================================================================
+namespace MyShop.WebMvc.Models
+{
+    public class ErrorViewModel
+    {
+        public string? RequestId { get; set; }
+
+        public bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+    }
+}
+
+================================================================================
+FILE: src\MyShop.WebMvc\Program.cs
+================================================================================
+using MyShop.WebMvc.Services;
+using System.Net.Http.Headers;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+builder.Services.AddControllersWithViews();
+
+
+
+// HttpClient + named client
+builder.Services.AddHttpClient("MyShop.WebApi", client =>
+{
+    // WebApi projenin dev URL’i:
+    client.BaseAddress = new Uri("https://localhost:7164"); // kendi portuna göre düzelt
+
+    client.DefaultRequestHeaders.Accept.Clear();
+    client.DefaultRequestHeaders.Accept.Add(
+        new MediaTypeWithQualityHeaderValue("application/json"));
+});
+
+builder.Services.AddScoped<ApiClient>();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Home/Error");
+    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
+    app.UseHsts();
+}
+
+app.UseHttpsRedirection();
+app.UseRouting();
+
+app.UseAuthorization();
+
+app.MapStaticAssets();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}")
+    .WithStaticAssets();
+
+
+app.Run();
+
+================================================================================
+FILE: src\MyShop.WebMvc\Services\ApiClient.cs
+================================================================================
+﻿using Microsoft.AspNetCore.WebUtilities;
+using MyShop.WebApi.Models;
+using System.Net.Http.Headers;
+using System.Text.Json;
+
+namespace MyShop.WebMvc.Services;
+
+
+public class ApiClient
+{
+    private readonly HttpClient _client;
+    private readonly ILogger<ApiClient> _logger;
+
+    public ApiClient(IHttpClientFactory httpClientFactory, ILogger<ApiClient> logger)
+    {
+        _logger = logger;
+        _client = httpClientFactory.CreateClient("MyShop.WebApi");
+    }
+
+    public async Task<ApiResponse<TResponse>> GetAsync<TResponse>(string path, Dictionary<string, object>? queryParams = null, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<object, TResponse>(HttpMethod.Get, path, null, queryParams, cancellationToken);
+    }
+
+    public async Task<ApiResponse<TResponse>> PostAsync<TRequest, TResponse>(string path, TRequest data, Dictionary<string, object>? queryParams = null, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<TRequest, TResponse>(HttpMethod.Post, path, data, queryParams, cancellationToken);
+    }
+
+    public async Task<ApiResponse<TResponse>> PutAsync<TRequest, TResponse>(string path, TRequest data, Dictionary<string, object>? queryParams = null, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<TRequest, TResponse>(HttpMethod.Put, path, data, queryParams, cancellationToken);
+    }
+
+    public async Task<ApiResponse<TResponse>> DeleteAsync<TResponse>(string path, Dictionary<string, object>? queryParams = null, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<object, TResponse>(HttpMethod.Delete, path, null, queryParams, cancellationToken);
+    }
+
+    public async Task<ApiResponse<TResponse>> PatchAsync<TRequest, TResponse>(string path, TRequest body, Dictionary<string, object>? queryParams = null, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<TRequest, TResponse>(new HttpMethod("PATCH"), path, body, queryParams, cancellationToken);
+    }
+
+    // A single, unified method for requests with or without query strings
+    private async Task<ApiResponse<TResponse>> SendRequestAsync<TRequest, TResponse>(HttpMethod method, string path, TRequest? data, Dictionary<string, object>? queryParams, CancellationToken cancellationToken = default)
+    {
+        string requestPath = path;
+        if (queryParams != null && queryParams.Any())
+        {
+            var queryString = queryParams.ToDictionary(kvp => kvp.Key, kvp => kvp.Value?.ToString());
+            requestPath = QueryHelpers.AddQueryString(path, queryString);
+        }
+
+        var request = new HttpRequestMessage(method, requestPath);
+
+        if (data != null && method != HttpMethod.Get && method != HttpMethod.Delete)
+        {
+            request.Content = JsonContent.Create(data);
+        }
+
+        var response = await _client.SendAsync(request, cancellationToken);
+        return await HandleResponse<TResponse>(response, cancellationToken);
+    }
+
+    public async Task<byte[]?> GetRawBytesAsync(string path, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var response = await _client.GetAsync(path, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Raw byte GET failed: {Status} - {Reason}", response.StatusCode, response.ReasonPhrase);
+                return null;
+            }
+
+            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception during raw byte GET: {Path}", path);
+            return null;
+        }
+    }
+
+    public async Task<ApiResponse<TResponse>> PostMultipartAsync<TResponse>(string path, MultipartFormDataContent formData, CancellationToken cancellationToken = default)
+    {
+        var serializerOptions = new JsonSerializerOptions
+        {
+            // JSON'dan gelen camelCase ile C#'taki PascalCase eşleşmesini sağlar.
+            PropertyNameCaseInsensitive = true,
+
+            // Diğer olası hataları es geçmek için
+            // NumberHandling = JsonNumberHandling.AllowReadingFromString 
+        };
+
+        try
+        {
+            var response = await _client.PostAsync(path, formData, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError("Multipart POST failed: {StatusCode} - {Reason}", response.StatusCode, response.ReasonPhrase);
+                //return ApiResponse<TResponse>.ErrorResponse($"HTTP {response.StatusCode}");
+                var errorJson = await response.Content.ReadAsStringAsync();
+                var apiError = JsonSerializer.Deserialize<ApiResponse<TResponse>>(errorJson);
+
+                // API'den gelen detaylı hata nesnesi varsa onu dön, yoksa genel hata dön
+                return apiError?.Success == false
+                    ? apiError
+                    : ApiResponse<TResponse>.ErrorResponse($"HTTP {response.StatusCode}");
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            var data = JsonSerializer.Deserialize<ApiResponse<TResponse>>(json, serializerOptions);
+            if (data == null)
+            {
+                _logger.LogError("Failed to deserialize API response: {Json}", json);
+                return ApiResponse<TResponse>.ErrorResponse("API yanıtı deserializasyon başarısız. Tip uyuşmazlığı olabilir.");
+            }
+
+            return data;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception during multipart POST");
+            return ApiResponse<TResponse>.ErrorResponse(ex.Message);
+        }
+    }
+
+    public async Task<ApiResponse<TResponse>> PostMultipartAsync<TResponse>(
+    string path,
+    IFormFileCollection files,
+    IDictionary<string, string?>? fields = null,
+    CancellationToken cancellationToken = default)
+    {
+        using var form = new MultipartFormDataContent();
+
+        // 1) Text alanları
+        if (fields is not null)
+        {
+            foreach (var kv in fields)
+            {
+                // null değerler için boş string gönderelim
+                form.Add(new StringContent(kv.Value ?? string.Empty), kv.Key);
+            }
+        }
+
+        // 2) Dosyalar
+        if (files is not null)
+        {
+            foreach (var file in files)
+            {
+                if (file?.Length > 0)
+                {
+                    var streamContent = new StreamContent(file.OpenReadStream());
+                    // İçerik tipi biliniyorsa set edelim, değilse octet-stream
+                    var contentType = string.IsNullOrWhiteSpace(file.ContentType)
+                        ? "application/octet-stream"
+                        : file.ContentType;
+                    streamContent.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+
+                    // ÖNEMLİ: 'name' paramı API tarafında beklenen alan adıdır.
+                    // HTML formundaki 'name' değerini (file.Name) aynen geçiyoruz.
+                    form.Add(streamContent, file.Name, file.FileName);
+                }
+            }
+        }
+
+        // 3) Mevcut yöntemi çağır
+        return await PostMultipartAsync<TResponse>(path, form, cancellationToken);
+    }
+
+    private async Task<ApiResponse<TResponse>> HandleResponse<TResponse>(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            try
+            {
+                // Using System.Text.Json built-in extension method
+                var data = await response.Content.ReadFromJsonAsync<ApiResponse<TResponse>>(cancellationToken);
+                return data ?? ApiResponse<TResponse>.ErrorResponse("Empty response.");
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "JSON Deserialization Error");
+                return ApiResponse<TResponse>.ErrorResponse(new List<string> { "JSON Deserialization Error: " + ex.Message });
+            }
+        }
+        else
+        {
+            _logger.LogError($"HTTP Error: {response.StatusCode} - {response.ReasonPhrase}");
+            return ApiResponse<TResponse>.ErrorResponse(new List<string> { $"HTTP Error: {response.StatusCode} - {response.ReasonPhrase}" });
+        }
+    }
+
+    public static string ToQueryString<T>(T obj)
+    {
+        var properties = typeof(T).GetProperties()
+            .Where(p => p.GetValue(obj) != null)
+            .Select(p =>
+            {
+                var value = p.GetValue(obj);
+                // URL kodlaması (encoding) için her bir değeri kodlarız
+                return $"{p.Name.ToLowerInvariant()}={Uri.EscapeDataString(value.ToString())}";
+            });
+
+        return "?" + string.Join("&", properties);
+    }
+}
+
+================================================================================
+FILE: src\MyShop.WebMvc\ViewModel\ProductGridFilterViewModel.cs
+================================================================================
+﻿namespace MyShop.WebApi.ViewModel;
+
+
+public sealed class ProductGridFilterViewModel
+{
+    public string? Search { get; set; }
+    public decimal? MinPrice { get; set; }
+    public decimal? MaxPrice { get; set; }
+    public string? CategoryName { get; set; }
+
+    public string? SortBy { get; set; }   // "Price,Name"
+    public string? SortDir { get; set; }  // "desc,asc"
+
+    public int PageIndex { get; set; } = 1;
+    public int PageSize { get; set; } = 20;
+}

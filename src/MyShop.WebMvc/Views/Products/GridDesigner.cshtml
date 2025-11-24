@@ -1,0 +1,131 @@
+﻿@{
+    ViewData["Title"] = "Product Grid Filter Designer";
+}
+
+<div id="gridDesignerRoot" class="container mt-4"
+     data-meta-url="@Url.Action("GetProductGridMetadata", "Products")"
+     data-search-url="@Url.Action("GridSearchApi", "Products")">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>Product Grid Filter Designer</h2>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Global Settings</h5>
+        </div>
+        <div class="card-body">
+            <div class="row align-items-center">
+                <div class="col-md-4">
+                    <label class="form-label fw-bold">Group Operator (between groups):</label>
+                    <select id="groupOperator" class="form-select">
+                        <option value="0">AND</option>
+                        <option value="1">OR</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Filter Groups</h5>
+            <button type="button" id="addGroupBtn" class="btn btn-sm btn-success">+ Add Group</button>
+        </div>
+        <div class="card-body">
+            <div id="groupsContainer">
+                <!-- JS ile dinamik gruplar eklenecek -->
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Sorting</h5>
+            <button type="button" id="addSortBtn" class="btn btn-sm btn-secondary">+ Add Sort</button>
+        </div>
+        <div class="card-body">
+            <div id="sortsContainer"></div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Pagination & Search</h5>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-2">
+                    <label class="form-label">Page Index:</label>
+                    <input type="number" id="pageIndex" value="1" min="1" class="form-control" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Page Size:</label>
+                    <input type="number" id="pageSize" value="20" min="1" class="form-control" />
+                </div>
+                <div class="col-md-2">
+                    <button type="button" id="runSearchBtn" class="btn btn-primary w-100">Run Search</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Debug JSON</h5>
+        </div>
+        <div class="card-body">
+            <pre id="rawJson" class="bg-light p-3 border rounded" style="max-height:250px; overflow:auto;"></pre>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Results</h5>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table id="resultsTable" class="table table-striped table-hover table-bordered">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Id</th>
+                            <th>Name</th>
+                            <th>Price</th>
+                            <th>Stock</th>
+                            <th>Category</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <!-- PAGER -->
+            <div id="pager" class="d-flex align-items-center gap-2 flex-wrap mt-3">
+                <div class="btn-group">
+                    <button type="button" id="btnFirst" class="btn btn-outline-secondary">« First</button>
+                    <button type="button" id="btnPrev" class="btn btn-outline-secondary">‹ Prev</button>
+                </div>
+
+                <span class="mx-2">
+                    Page <span id="lblPageIndex" class="fw-bold">0</span> of <span id="lblTotalPages" class="fw-bold">0</span>
+                    (Total: <span id="lblTotalCount" class="fw-bold">0</span>)
+                </span>
+
+                <div class="btn-group">
+                    <button type="button" id="btnNext" class="btn btn-outline-secondary">Next ›</button>
+                    <button type="button" id="btnLast" class="btn btn-outline-secondary">Last »</button>
+                </div>
+
+                <div class="input-group" style="width: auto;">
+                    <span class="input-group-text">Go to:</span>
+                    <input type="number" id="goToPage" value="1" min="1" class="form-control" style="width: 70px;" />
+                    <button type="button" id="btnGo" class="btn btn-outline-primary">Go</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/product-grid-designer.js" asp-append-version="true"></script>
+}

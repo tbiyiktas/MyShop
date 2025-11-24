@@ -1,0 +1,31 @@
+@MyShop.WebApi_HostAddress = http://localhost:5048
+@pageIndex = 1
+@pageSize = 20
+@threshold = 10
+@search = lap
+@minPrice = 1000
+@maxPrice = 5000
+@categoryName = Electronics
+@sortBy = Price,Name,Category.Name
+@sortDir = desc,asc,asc
+
+GET {{MyShop.WebApi_HostAddress}}/api/Products?pageIndex={{pageIndex}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+GET {{MyShop.WebApi_HostAddress}}/api/Products/low-stock?threshold={{threshold}}&pageIndex={{pageIndex}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+GET {{MyShop.WebApi_HostAddress}}/api/Products/low-stock-expensive-non-electronics?threshold={{threshold}}&minPrice={{minPrice}}&pageIndex={{pageIndex}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
+GET {{MyShop.WebApi_HostAddress}}/api/products/search?search={{search}}&minPrice={{minPrice}}&maxPrice={{maxPrice}}&categoryName={{categoryName}}&sortBy={{sortBy}}&sortDir={{sortDir}}&pageIndex={{pageIndex}}&pageSize={{pageSize}}
+Accept: application/json
+
+###
+
