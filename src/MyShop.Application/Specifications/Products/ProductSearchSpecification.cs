@@ -64,7 +64,10 @@ public sealed class ProductSearchSpecification : Specification<Product>
         Criteria = ExpressionBuilder.BuildAndPredicate<Product>(filters);
 
         // Category'yi her durumda include et (mapping için)
-        AddInclude(p => p.Category);
+        ApplyInclude(builder =>
+        {
+            builder.Include(p => p.Category);
+        });
 
         // SORT
         if (sorts is not null && sorts.Count > 0)
@@ -77,6 +80,9 @@ public sealed class ProductSearchSpecification : Specification<Product>
             // Default: Name asc
             ApplyOrderBy(q => q.OrderBy(p => p.Name));
         }
+
+        // Read-only query: disable change tracking for performance
+        ApplyAsNoTracking();
     }
 
 }

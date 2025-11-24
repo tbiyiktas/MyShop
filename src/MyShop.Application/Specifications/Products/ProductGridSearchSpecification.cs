@@ -16,7 +16,10 @@ public sealed class ProductGridSearchSpecification : Specification<Product>
         Criteria = GridFilterExpressionBuilder.BuildPredicate<Product>(request);
 
         // 2) Category'yi her zaman include edelim (Category.Name kullanıldığı için)
-        AddInclude(p => p.Category);
+        ApplyInclude(builder =>
+        {
+            builder.Include(p => p.Category);
+        });
 
         // 3) Sort'ları mapping edip multi-sort uygula
         var sorts = request.Sorts?.ToSortCriteria();
@@ -29,5 +32,8 @@ public sealed class ProductGridSearchSpecification : Specification<Product>
         {
             ApplyOrderBy(q => q.OrderBy(p => p.Name));
         }
+
+        // Read-only query: disable change tracking for performance
+        ApplyAsNoTracking();
     }
 }

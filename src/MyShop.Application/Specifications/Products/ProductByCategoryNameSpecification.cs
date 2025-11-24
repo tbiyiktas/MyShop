@@ -20,9 +20,15 @@ public sealed class ProductByCategoryNameSpecification : Specification<Product>
         Criteria = p => p.Category.Name == categoryName && p.IsActive;
 
         // INCLUDE: Category
-        AddInclude(p => p.Category);
+        ApplyInclude(builder =>
+        {
+            builder.Include(p => p.Category);
+        });
 
         // ORDER: isim
         ApplyOrderBy(q => q.OrderBy(p => p.Name));
+
+        // Read-only query: disable change tracking for performance
+        ApplyAsNoTracking();
     }
 }

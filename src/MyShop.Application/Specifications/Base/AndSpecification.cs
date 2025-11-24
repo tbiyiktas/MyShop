@@ -26,13 +26,25 @@ public sealed class AndSpecification<TEntity> : Specification<TEntity>
         }
 
         // Includes: left + right (distinct)
-        Includes.AddRange(
-            left.Includes
-                .Concat(right.Includes)
+        IncludeExpressions.AddRange(
+            left.IncludeExpressions
+                .Concat(right.IncludeExpressions)
                 .Distinct());
 
         // Order: left > right
         OrderBy = left.OrderBy ?? right.OrderBy;
         OrderByDescending = left.OrderByDescending ?? right.OrderByDescending;
+
+        // AsNoTracking: true if either left or right is true
+        if (left.AsNoTracking || right.AsNoTracking)
+        {
+            ApplyAsNoTracking();
+        }
+
+        // IgnoreQueryFilters: true if either left or right is true
+        if (left.IgnoreQueryFilters || right.IgnoreQueryFilters)
+        {
+            ApplyIgnoreQueryFilters();
+        }
     }
 }

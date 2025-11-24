@@ -18,7 +18,10 @@ public sealed class LowStockSpecification : Specification<Product>
 
         Criteria = p => p.StockQuantity < threshold && p.IsActive;
 
-        AddInclude(p => p.Category);
+        ApplyInclude(builder =>
+        {
+            builder.Include(p => p.Category);
+        });
 
         if (orderByPriceDescending)
         {
@@ -30,5 +33,8 @@ public sealed class LowStockSpecification : Specification<Product>
                 .OrderBy(p => p.StockQuantity)
                 .ThenBy(p => p.Name));
         }
+
+        // Read-only query: disable change tracking for performance
+        ApplyAsNoTracking();
     }
 }

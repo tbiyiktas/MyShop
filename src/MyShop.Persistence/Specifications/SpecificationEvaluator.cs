@@ -13,14 +13,27 @@ public static class SpecificationEvaluator
         if (specification is null)
             return query;
 
+        // Apply AsNoTracking for read-only queries (performance optimization)
+        if (specification.AsNoTracking)
+        {
+            query = query.AsNoTracking();
+        }
+
+        // Apply IgnoreQueryFilters to bypass global filters (e.g., soft delete)
+        if (specification.IgnoreQueryFilters)
+        {
+            query = query.IgnoreQueryFilters();
+        }
+
         if (specification.Criteria is not null)
         {
             query = query.Where(specification.Criteria);
         }
 
-        foreach (var includeExpression in specification.Includes)
+        // Advanced includes with ThenInclude support
+        foreach (var includeExpression in specification.IncludeExpressions)
         {
-            query = query.Include(includeExpression);
+            query = includeExpression.Apply(query);
         }
 
         if (specification.OrderBy is not null)
@@ -30,6 +43,12 @@ public static class SpecificationEvaluator
         else if (specification.OrderByDescending is not null)
         {
             query = specification.OrderByDescending(query);
+        }
+
+        // Apply split query to prevent cartesian explosion
+        if (specification.AsSplitQuery)
+        {
+            query = query.AsSplitQuery();
         }
 
         return query;

@@ -21,8 +21,19 @@ public sealed class NotSpecification<TEntity> : Specification<TEntity>
         }
 
         // Includes & Order'ı mirror et
-        Includes.AddRange(inner.Includes);
+        IncludeExpressions.AddRange(inner.IncludeExpressions);
         OrderBy = inner.OrderBy;
         OrderByDescending = inner.OrderByDescending;
+
+        // AsNoTracking & IgnoreQueryFilters'ı mirror et
+        if (inner.AsNoTracking)
+        {
+            ApplyAsNoTracking();
+        }
+
+        if (inner.IgnoreQueryFilters)
+        {
+            ApplyIgnoreQueryFilters();
+        }
     }
 }

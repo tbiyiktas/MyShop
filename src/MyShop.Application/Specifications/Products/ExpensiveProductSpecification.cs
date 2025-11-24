@@ -18,8 +18,14 @@ public sealed class ExpensiveProductSpecification : Specification<Product>
 
         Criteria = p => p.Price >= minPrice && p.IsActive;
 
-        AddInclude(p => p.Category);
+        ApplyInclude(builder =>
+        {
+            builder.Include(p => p.Category);
+        });
 
         ApplyOrderByDescending(q => q.OrderByDescending(p => p.Price));
+
+        // Read-only query: disable change tracking for performance
+        ApplyAsNoTracking();
     }
 }
