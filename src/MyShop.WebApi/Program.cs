@@ -39,6 +39,9 @@ builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();
 builder.Services.AddScoped<IRepository<Product>>(sp => sp.GetRequiredService<IProductRepository>());
 builder.Services.AddScoped<IRepository<Category>, CategoryRepository>();
 
+// Include Expression Factory (Singleton - stateless)
+builder.Services.AddSingleton<IIncludeExpressionFactory, MyShop.Persistence.Specifications.IncludeExpressionFactory>();
+
 // Services
 builder.Services.AddScoped<ProductService>();
 builder.Services.AddScoped<CategoryService>();
@@ -59,6 +62,14 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 var app = builder.Build();
+
+// Initialize IncludeBuilder with factory from DI
+using (var scope = app.Services.CreateScope())
+{
+    var factory = scope.ServiceProvider.GetRequiredService<IIncludeExpressionFactory>();
+    MyShop.Application.Specifications.Base.IncludeBuilder.Initialize(factory);
+}
+
 
 // HTTP request pipeline
 if (app.Environment.IsDevelopment())

@@ -3,6 +3,11 @@ using MyShop.Application.Abstractions;
 
 namespace MyShop.Application.Specifications.Base;
 
+/// <summary>
+/// Base implementation of <see cref="ISpecification{TEntity}"/> providing default behavior for criteria,
+/// includes, ordering, and query execution flags.
+/// </summary>
+/// <typeparam name="TEntity">The entity type the specification targets.</typeparam>
 public abstract class Specification<TEntity> : ISpecification<TEntity>
     where TEntity : class
 {
@@ -18,7 +23,10 @@ public abstract class Specification<TEntity> : ISpecification<TEntity>
     public bool IgnoreQueryFilters { get; private set; }
     public bool AsSplitQuery { get; private set; }
 
-    // Fluent include with ThenInclude support
+    /// <summary>
+    /// Configures eager‑loading includes using the fluent <see cref="IncludeBuilder{TEntity}"/>.
+    /// </summary>
+    /// <param name="configure">Action that receives a builder to define include chains.</param>
     protected void ApplyInclude(Action<IncludeBuilder<TEntity>> configure)
     {
         var builder = new IncludeBuilder<TEntity>();
@@ -26,9 +34,17 @@ public abstract class Specification<TEntity> : ISpecification<TEntity>
         IncludeExpressions.AddRange(builder.Build());
     }
 
+    /// <summary>
+    /// Sets the ordering function for ascending order.
+    /// </summary>
+    /// <param name="orderByExpression">Expression defining the ordering.</param>
     protected void ApplyOrderBy(Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>> orderByExpression)
         => OrderBy = orderByExpression;
 
+    /// <summary>
+    /// Sets the ordering function for descending order.
+    /// </summary>
+    /// <param name="orderByDescendingExpression">Expression defining the descending ordering.</param>
     protected void ApplyOrderByDescending(Func<IQueryable<TEntity>, IOrderedQueryable<TEntity>> orderByDescendingExpression)
         => OrderByDescending = orderByDescendingExpression;
 
@@ -70,13 +86,21 @@ public abstract class Specification<TEntity> : ISpecification<TEntity>
         }
     }
 
+    /// <summary>
+    /// Enables <c>AsNoTracking</c> for read‑only queries.
+    /// </summary>
     protected void ApplyAsNoTracking()
         => AsNoTracking = true;
 
+    /// <summary>
+    /// Enables ignoring of global query filters.
+    /// </summary>
     protected void ApplyIgnoreQueryFilters()
         => IgnoreQueryFilters = true;
 
-    // NEW: Split query support
+    /// <summary>
+    /// Enables EF Core split‑query execution.
+    /// </summary>
     protected void ApplyAsSplitQuery()
         => AsSplitQuery = true;
 }
